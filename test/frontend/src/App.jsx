@@ -28,7 +28,7 @@ export default function App() {
     if (!vacancyId) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/match/vacancy/${vacancyId}`);
+      const res = await fetch(`${API_BASE}/match/vacancy/${vacancyId}?no_cache=true&_t=${Date.now()}`);
       const data = await res.json();
       setMatches(data.matches || []);
     } catch (err) {
@@ -62,6 +62,13 @@ export default function App() {
     }
   };
 
+  const actionLabels = {
+    invite: 'Приглашен на интервью (+5)',
+    like: 'Добавлен в шорт-лист (+2.5)',
+    reject: 'Отказ (-1.5)',
+    instant_reject: 'Быстрый инста-отказ (-3.5)',
+  };
+
   // Запись действия HR (Implicit Feedback для ALS)
   const handleInteraction = async (candidateId, action) => {
     if (!selectedVacancy) return;
@@ -76,10 +83,11 @@ export default function App() {
         }),
       });
       const data = await res.json();
-      setStatusMsg(`Действие "${action}" сохранено! (Вес: ${data.weight})`);
+      const label = actionLabels[action] || action;
+      setStatusMsg(`Действие сохранено: "${label}"! Скоринг пересчитан.`);
       setTimeout(() => setStatusMsg(''), 3000);
-      // Обновляем список с небольшим таймаутом, чтобы пересчитать ALS
-      setTimeout(() => fetchMatches(selectedVacancy.id), 800);
+      // Мгновенное обновление скоров в интерфейсе
+      await fetchMatches(selectedVacancy.id);
     } catch (err) {
       console.error('Interaction error', err);
     }
@@ -91,10 +99,10 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/interactions/reset`, { method: 'POST' });
       await res.json();
-      setStatusMsg('ALS и действия сброшены к исходным!');
+      setStatusMsg('Все действия и ALS веса сброшены к исходным!');
       setTimeout(() => setStatusMsg(''), 3000);
       if (selectedVacancy) {
-        fetchMatches(selectedVacancy.id);
+        await fetchMatches(selectedVacancy.id);
       }
     } catch (err) {
       setStatusMsg('Ошибка при сбросе действий');

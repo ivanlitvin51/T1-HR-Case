@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 
+import redis.asyncio as aioredis
+from app.core.config import settings
 from app.core.database import get_db, async_session_maker
 from app.models.hr import HRInteraction
 from app.schemas.hr import HRInteractionCreate, HRInteractionOut
@@ -39,7 +41,21 @@ async def record_interaction(
     await db.commit()
     await db.refresh(interaction)
 
-    # Фоновый триггер переобучения ALS
+    # 1. Мгновенная онлайн-обратная связь в движке скоринга
+    engine = ALSEngine.get_instance()
+    engine.record_direct_feedback(interaction_in.vacancy_id, interaction_in.candidate_id, weight)
+
+    # 2. Немедленная инвалидация Redis-кэша для актуального пересчета процентов
+    try:
+        redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        keys = await redis_client.keys(f"match_v1:vacancy:{interaction_in.vacancy_id}:*")
+        if keys:
+            await redis_client.delete(*keys)
+        await redis_client.aclose()
+    except Exception:
+        pass
+
+    # 3. Фоновое обновление скрытых факторов ALS
     background_tasks.add_task(retrain_als_background)
 
     return interaction

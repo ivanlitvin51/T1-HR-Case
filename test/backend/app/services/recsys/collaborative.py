@@ -21,12 +21,19 @@ class ALSEngine:
     _candidate_to_idx: Dict[int, int] = {}
     _idx_to_candidate: Dict[int, int] = {}
     _is_trained: bool = False
+    _direct_feedback: Dict[Tuple[int, int], float] = {}
 
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
             cls._instance = ALSEngine()
         return cls._instance
+
+    def record_direct_feedback(self, vacancy_id: int, candidate_id: int, weight: float):
+        """Мгновенная онлайн-корректировка скоринга при действии HR"""
+        key = (vacancy_id, candidate_id)
+        self._direct_feedback[key] = self._direct_feedback.get(key, 0.0) + weight
+        logger.info(f"Recorded online feedback for pair {key}: cumulative weight = {self._direct_feedback[key]}")
 
     def reset(self):
         """Сброс обученной модели ALS и очистка матриц"""
@@ -35,8 +42,9 @@ class ALSEngine:
         self._idx_to_vacancy.clear()
         self._candidate_to_idx.clear()
         self._idx_to_candidate.clear()
+        self._direct_feedback.clear()
         self._is_trained = False
-        logger.info("ALSEngine state has been reset.")
+        logger.info("ALSEngine state and online feedback have been reset.")
 
     def fit(self, interactions: List[Tuple[int, int, float]]):
         """
@@ -89,30 +97,37 @@ class ALSEngine:
     def predict_score(self, vacancy_id: int, candidate_id: int) -> Tuple[Optional[float], float]:
         """
         Возвращает (collaborative_score, confidence_weight).
-        Если модели нет или нет данных по паре, возвращает (None, 0.0)
+        1) Мгновенно учитывает действия HR (онлайн-фидбек) через логистическую сигмоиду.
+        2) Если обучена матрица ALS, комбинирует ее скрытые факторы.
         """
-        if not self._is_trained or self._model is None:
-            return None, 0.0
+        pair_key = (vacancy_id, candidate_id)
+        has_direct = pair_key in self._direct_feedback
+        direct_w = self._direct_feedback.get(pair_key, 0.0)
 
-        if vacancy_id not in self._vacancy_to_idx or candidate_id not in self._candidate_to_idx:
-            # Холодный старт: сущность еще не встречалась в матрице
-            return None, 0.0
+        als_factor_score = None
+        if self._is_trained and self._model is not None:
+            if vacancy_id in self._vacancy_to_idx and candidate_id in self._candidate_to_idx:
+                try:
+                    v_idx = self._vacancy_to_idx[vacancy_id]
+                    c_idx = self._candidate_to_idx[candidate_id]
+                    v_factors = self._model.user_factors[v_idx]
+                    c_factors = self._model.item_factors[c_idx]
+                    raw_score = float(np.dot(v_factors, c_factors))
+                    als_factor_score = 1.0 / (1.0 + np.exp(-raw_score))
+                except Exception as e:
+                    logger.error(f"Error computing ALS dot product: {e}")
 
-        try:
-            v_idx = self._vacancy_to_idx[vacancy_id]
-            c_idx = self._candidate_to_idx[candidate_id]
+        if has_direct:
+            # Преобразуем накопленный вес через сигмоиду:
+            # +5.0 (invite) -> ~0.92, +2.5 (like) -> ~0.78, -1.5 (reject) -> ~0.32, -3.5 (instant reject) -> ~0.15
+            direct_score = 1.0 / (1.0 + np.exp(-direct_w / 2.0))
+            if als_factor_score is not None:
+                final_collab = 0.7 * direct_score + 0.3 * als_factor_score
+            else:
+                final_collab = direct_score
+            return float(final_collab), 0.35
 
-            v_factors = self._model.user_factors[v_idx]
-            c_factors = self._model.item_factors[c_idx]
+        elif als_factor_score is not None:
+            return float(als_factor_score), 0.35
 
-            # Скалярное произведение скрытых факторов
-            raw_score = float(np.dot(v_factors, c_factors))
-            # Сигмоида для нормирования в [0, 1]
-            norm_score = 1.0 / (1.0 + np.exp(-raw_score))
-            
-            # Вес влияния ALS (чем больше факторов/взаимодействий, тем выше доверие)
-            confidence = 0.35
-            return norm_score, confidence
-        except Exception as e:
-            logger.error(f"Error predicting ALS score: {e}")
-            return None, 0.0
+        return None, 0.0
