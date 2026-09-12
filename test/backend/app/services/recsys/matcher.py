@@ -90,9 +90,19 @@ class HybridMatcher:
         als_engine = ALSEngine.get_instance()
         als_score, als_weight = als_engine.predict_score(vacancy.id, candidate.id)
 
-        # 7. Финальный гибридный скоринг с защитой от Cold Start
+        # 7. Финальный гибридный скоринг с правильным Boost / Penalty
         if als_score is not None and als_weight > 0:
-            final_score = (1.0 - als_weight) * content_score + als_weight * als_score
+            if als_score >= 0.5:
+                # Положительное действие (Приглашение, Шорт-лист):
+                # Гарантированно увеличивает скоринг кандидата (бонус к оставшемуся запасу до 100%)
+                boost_factor = (als_score - 0.5) / 0.5  # от 0.0 до 1.0
+                final_score = content_score + (1.0 - content_score) * (boost_factor * 0.75)
+            else:
+                # Отрицательное действие (Отказ, Инста-отказ):
+                # Гарантированно снижает скоринг пропорционально штрафу
+                penalty_factor = (0.5 - als_score) / 0.5  # от 0.0 до 1.0
+                final_score = content_score * (1.0 - penalty_factor * 0.45)
+            final_score = max(0.01, min(1.0, final_score))
         else:
             final_score = content_score
             als_weight = 0.0
